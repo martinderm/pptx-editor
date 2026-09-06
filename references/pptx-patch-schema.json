@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PPTXPatchSchema",
+  "description": "Schema for deterministic PowerPoint presentation patching with preconditions",
+  "type": "object",
+  "required": ["ops"],
+  "properties": {
+    "ops": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["op", "find", "replace"],
+            "properties": {
+              "op": { "const": "replace_text" },
+              "slide_number": { "type": "integer", "minimum": 1, "description": "1-based slide index (optional)" },
+              "shape_id": { "type": "integer", "description": "Specific shape ID (optional)" },
+              "find": { "type": "string", "minLength": 1 },
+              "replace": { "type": "string" },
+              "expected_matches": { "type": "integer", "minimum": 1, "default": 1 },
+              "include_notes": { "type": "boolean", "default": false }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["op", "slide_number", "title"],
+            "properties": {
+              "op": { "const": "set_slide_title" },
+              "slide_number": { "type": "integer", "minimum": 1 },
+              "title": { "type": "string" },
+              "expected_old_title": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["op", "slide_number", "bullets"],
+            "properties": {
+              "op": { "const": "set_slide_bullets" },
+              "slide_number": { "type": "integer", "minimum": 1 },
+              "shape_id": { "type": "integer" },
+              "expected_contains": { "type": "string" },
+              "bullets": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    { "type": "string" },
+                    {
+                      "type": "object",
+                      "required": ["text"],
+                      "properties": {
+                        "text": { "type": "string" },
+                        "level": { "type": "integer", "minimum": 0, "maximum": 5, "default": 0 },
+                        "bold": { "type": "boolean", "default": false },
+                        "italic": { "type": "boolean", "default": false }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["op", "slide_number", "text"],
+            "properties": {
+              "op": { "const": "set_speaker_notes" },
+              "slide_number": { "type": "integer", "minimum": 1 },
+              "text": { "type": "string" },
+              "mode": { "type": "string", "enum": ["replace", "append"], "default": "replace" },
+              "expected_contains": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["op", "slide_number", "cells"],
+            "properties": {
+              "op": { "const": "fill_table" },
+              "slide_number": { "type": "integer", "minimum": 1 },
+              "shape_id": { "type": "integer" },
+              "cells": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["row", "col", "text"],
+                  "properties": {
+                    "row": { "type": "integer", "minimum": 1 },
+                    "col": { "type": "integer", "minimum": 1 },
+                    "text": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["replace", "append"], "default": "replace" }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["op", "slide_number", "image_path"],
+            "properties": {
+              "op": { "const": "replace_image" },
+              "slide_number": { "type": "integer", "minimum": 1 },
+              "shape_id": { "type": "integer" },
+              "image_path": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "additionalProperties": false
+}
