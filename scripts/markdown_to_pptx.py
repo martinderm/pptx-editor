@@ -27,7 +27,14 @@ from pathlib import Path
 from typing import Any
 
 from pptx import Presentation
+from pptx.enum.shapes import PP_PLACEHOLDER
 from pptx.util import Inches, Pt
+
+try:
+    from pptx_ops import clear_slides, load_presentation
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from pptx_ops import clear_slides, load_presentation
 
 
 @dataclass
@@ -48,17 +55,95 @@ def existing_file(path_str: str) -> Path:
     return p
 
 
-def parse_markdown(text: str) -> list[SlideData]:
-    # Strip YAML Front Matter if present
+def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """Extract YAML frontmatter between opening and closing '---'."""
+    meta: dict[str, str] = {}
     lines = text.splitlines()
-    if len(lines) >= 2 and lines[0].strip() == "---":
-        closing_idx = -1
-        for idx in range(1, len(lines)):
-            if lines[idx].strip() == "---":
-                closing_idx = idx
-                break
-        if closing_idx != -1:
-            lines = lines[closing_idx + 1 :]
+    if not lines or lines[0].strip() != "---":
+        return meta, text
+
+    closing_idx = -1
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            closing_idx = idx
+            break
+
+    if closing_idx == -1:
+        return meta, text
+
+    fm_text = "\n".join(lines[1:closing_idx])
+    remaining_text = "\n".join(lines[closing_idx + 1 :])
+
+    try:
+        import yaml
+
+        parsed = yaml.safe_load(fm_text)
+        if isinstance(parsed, dict):
+            for k, v in parsed.items():
+                if v is not None:
+                    meta[str(k).lower().strip()] = str(v).strip()
+            return meta, remaining_text
+    except Exception:
+        pass
+
+    for line in fm_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" in line:
+            k, v = line.split(":", 1)
+            meta[k.lower().strip()] = v.strip().strip("'\"")
+
+    return meta, remaining_text
+
+
+def validate_footer_metadata(
+    meta: dict[str, str],
+    cli_footer: str | None = None,
+    cli_presenter: str | None = None,
+    cli_event: str | None = None,
+    cli_date: str | None = None,
+    allow_no_footer: bool = False,
+) -> tuple[str, list[str]]:
+    """Validate and build footer text from metadata or CLI arguments."""
+    if allow_no_footer:
+        return "", []
+
+    if cli_footer:
+        return cli_footer.strip(), []
+    if meta.get("footer") or meta.get("fusszeile"):
+        return (meta.get("footer") or meta.get("fusszeile", "")).strip(), []
+
+    presenter = (
+        cli_presenter
+        or meta.get("presenter")
+        or meta.get("vortragende")
+        or meta.get("vortragender")
+        or meta.get("author")
+        or ""
+    )
+    event = cli_event or meta.get("event") or meta.get("ort") or meta.get("veranstaltung") or ""
+    date = cli_date or meta.get("date") or meta.get("datum") or ""
+
+    missing = []
+    if not presenter:
+        missing.append("presenter (Vortragende/r)")
+    if not event:
+        missing.append("event (Ort/Event)")
+    if not date:
+        missing.append("date (Datum)")
+
+    parts = [p.strip() for p in [presenter, event, date] if p.strip()]
+    footer_text = " | ".join(parts)
+    return footer_text, missing
+
+
+def parse_markdown(text: str) -> tuple[dict[str, str], list[SlideData]]:
+    # Extract YAML Front Matter if present
+    meta, remaining_text = parse_frontmatter(text)
+
+    # Split slides by '---'
+    lines = remaining_text.splitlines()
 
     # Split slides by '---'
     raw_slides: list[list[str]] = []
@@ -152,12 +237,130 @@ def parse_markdown(text: str) -> list[SlideData]:
 
         parsed_slides.append(sd)
 
-    return parsed_slides
+    return meta, parsed_slides
 
 
-def build_presentation(slides: list[SlideData], template_path: Path | None = None) -> Presentation:
+def add_formatted_runs(paragraph: Any, text: str, default_bold: bool = False) -> None:
+    """Parse inline Markdown (**bold**, *italic*) and add formatted runs."""
+    pattern = re.compile(r"(\*\*.*?\*\*|\*.*?\*|__.*?__|_.*?_)")
+    parts = pattern.split(text)
+    for part in parts:
+        if not part:
+            continue
+        if (part.startswith("**") and part.endswith("**")) or (part.startswith("__") and part.endswith("__")):
+            run = paragraph.add_run()
+            run.text = part[2:-2]
+            run.font.bold = True
+        elif (part.startswith("*") and part.endswith("*")) or (part.startswith("_") and part.endswith("_")):
+            run = paragraph.add_run()
+            run.text = part[1:-1]
+            run.font.italic = True
+        else:
+            run = paragraph.add_run()
+            run.text = part
+            if default_bold:
+                run.font.bold = True
+
+
+def apply_slide_number_and_footer(
+    slide: Any,
+    slide_num: int,
+    total_slides: int,
+    footer_text: str,
+    prs: Presentation,
+    skip_slide_number: bool = False,
+) -> None:
+    """Clone and populate slide number and footer placeholders from layout, with fallbacks."""
+    layout = slide.slide_layout
+    existing_types = set()
+    for ph in slide.placeholders:
+        try:
+            existing_types.add(ph.placeholder_format.type)
+        except Exception:
+            pass
+
+    # 1. Clone layout placeholders if missing on the slide
+    if layout and hasattr(layout, "placeholders"):
+        for l_ph in layout.placeholders:
+            try:
+                p_type = l_ph.placeholder_format.type
+                if p_type == PP_PLACEHOLDER.SLIDE_NUMBER and not skip_slide_number and p_type not in existing_types:
+                    slide.shapes.clone_placeholder(l_ph)
+                    existing_types.add(p_type)
+                elif p_type == PP_PLACEHOLDER.FOOTER and footer_text and p_type not in existing_types:
+                    slide.shapes.clone_placeholder(l_ph)
+                    existing_types.add(p_type)
+            except Exception:
+                pass
+
+    # 2. Populate placeholders
+    has_num_ph = False
+    has_footer_ph = False
+
+    for s_ph in slide.placeholders:
+        try:
+            p_type = s_ph.placeholder_format.type
+            if p_type == PP_PLACEHOLDER.SLIDE_NUMBER:
+                if skip_slide_number:
+                    s_ph.text = ""
+                else:
+                    s_ph.text = str(slide_num)
+                has_num_ph = True
+            elif p_type == PP_PLACEHOLDER.FOOTER and footer_text:
+                s_ph.text = footer_text
+                has_footer_ph = True
+        except Exception:
+            pass
+
+    # 3. Fallbacks if template layout does not have these placeholders
+    if not has_num_ph and not skip_slide_number:
+        tb = slide.shapes.add_textbox(
+            prs.slide_width - Inches(1.5),
+            prs.slide_height - Inches(0.55),
+            Inches(1.2),
+            Inches(0.4),
+        )
+        p = tb.text_frame.paragraphs[0]
+        p.text = str(slide_num)
+        p.font.size = Pt(10)
+
+    if not has_footer_ph and footer_text:
+        tb = slide.shapes.add_textbox(
+            Inches(1.0),
+            prs.slide_height - Inches(0.55),
+            prs.slide_width - Inches(3.0),
+            Inches(0.4),
+        )
+        p = tb.text_frame.paragraphs[0]
+        p.text = footer_text
+        p.font.size = Pt(10)
+
+
+def parse_bool(val: Any, default: bool = False) -> bool:
+    """Parse boolean value from string or bool, with default."""
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    s = str(val).strip().lower()
+    if s in ("true", "1", "yes", "ja"):
+        return True
+    if s in ("false", "0", "no", "nein"):
+        return False
+    return default
+
+
+def build_presentation(
+    slides: list[SlideData],
+    template_path: Path | None = None,
+    clear_template_slides: bool = True,
+    footer_text: str = "",
+    title_slide_number: bool = False,
+) -> Presentation:
     if template_path and template_path.exists():
-        prs = Presentation(str(template_path))
+        prs = load_presentation(template_path)
+        if clear_template_slides:
+            clear_slides(prs)
     else:
         prs = Presentation()
         prs.slide_width = Inches(13.333)
@@ -184,8 +387,17 @@ def build_presentation(slides: list[SlideData], template_path: Path | None = Non
             if slide.shapes.title and sd.title:
                 slide.shapes.title.text = sd.title
 
-            # Left and right content placeholders
-            content_phs = [sh for sh in slide.placeholders if sh != slide.shapes.title]
+            # Left and right content placeholders only
+            content_phs = [
+                sh
+                for sh in slide.placeholders
+                if sh != slide.shapes.title
+                and getattr(sh, "placeholder_format", None)
+                and sh.placeholder_format.type in (PP_PLACEHOLDER.OBJECT, PP_PLACEHOLDER.BODY)
+            ]
+            if not content_phs:
+                content_phs = [sh for sh in slide.placeholders if sh != slide.shapes.title]
+
             for col_idx, col_items in enumerate(sd.columns[: len(content_phs)]):
                 ph = content_phs[col_idx]
                 tf = ph.text_frame
@@ -193,8 +405,10 @@ def build_presentation(slides: list[SlideData], template_path: Path | None = Non
                 tf.clear()
                 for b_idx, (level, b_text) in enumerate(col_items):
                     p = tf.paragraphs[0] if b_idx == 0 else tf.add_paragraph()
-                    p.text = b_text
+                    p.text = ""
                     p.level = level
+                    is_col_header = (b_idx == 0)
+                    add_formatted_runs(p, b_text, default_bold=is_col_header)
 
         else:
             # Standard Title and Content
@@ -204,9 +418,15 @@ def build_presentation(slides: list[SlideData], template_path: Path | None = Non
 
             content_ph = None
             for sh in slide.placeholders:
-                if sh != slide.shapes.title:
-                    content_ph = sh
-                    break
+                if sh != slide.shapes.title and getattr(sh, "placeholder_format", None):
+                    if sh.placeholder_format.type in (PP_PLACEHOLDER.OBJECT, PP_PLACEHOLDER.BODY):
+                        content_ph = sh
+                        break
+            if not content_ph:
+                for sh in slide.placeholders:
+                    if sh != slide.shapes.title:
+                        content_ph = sh
+                        break
 
             # If table
             if sd.table_rows:
@@ -223,7 +443,10 @@ def build_presentation(slides: list[SlideData], template_path: Path | None = Non
                 for r_i, r_data in enumerate(sd.table_rows):
                     for c_i, c_text in enumerate(r_data):
                         if c_i < cols:
-                            tbl.cell(r_i, c_i).text = c_text
+                            cell = tbl.cell(r_i, c_i)
+                            cell.text = ""
+                            cp = cell.text_frame.paragraphs[0]
+                            add_formatted_runs(cp, c_text, default_bold=(r_i == 0))
 
             elif sd.bullets and content_ph:
                 tf = content_ph.text_frame
@@ -231,8 +454,20 @@ def build_presentation(slides: list[SlideData], template_path: Path | None = Non
                 tf.clear()
                 for b_idx, (level, b_text) in enumerate(sd.bullets):
                     p = tf.paragraphs[0] if b_idx == 0 else tf.add_paragraph()
-                    p.text = b_text
+                    p.text = ""
                     p.level = level
+                    add_formatted_runs(p, b_text)
+
+        # Apply Slide Number & Footer
+        skip_num = (idx == 0) and not title_slide_number
+        apply_slide_number_and_footer(
+            slide=slide,
+            slide_num=idx + 1,
+            total_slides=len(slides),
+            footer_text=footer_text,
+            prs=prs,
+            skip_slide_number=skip_num,
+        )
 
         # Speaker notes
         if sd.speaker_notes:
@@ -246,11 +481,83 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Convert Markdown to PowerPoint (.pptx)")
     parser.add_argument("--in", dest="infile", type=existing_file, required=True, help="Eingabe Markdown-Datei")
     parser.add_argument("--out", dest="outfile", type=Path, required=True, help="Ausgabe PPTX-Datei")
-    parser.add_argument("--template", dest="template", type=existing_file, help="Optionale Vorlage (.pptx)")
+    parser.add_argument("--template", dest="template", type=existing_file, help="Optionale Vorlage (.pptx oder .potx)")
+    parser.add_argument(
+        "--clear-template-slides",
+        dest="clear_template_slides",
+        action="store_true",
+        default=True,
+        help="Entfernt vorhandene Dummy-Folien aus der Vorlage (Standard: True)",
+    )
+    parser.add_argument(
+        "--keep-template-slides",
+        dest="clear_template_slides",
+        action="store_false",
+        help="Bestehende Folien in der Vorlage beibehalten",
+    )
+    parser.add_argument("--presenter", dest="presenter", type=str, help="Vortragende/r (falls nicht im Frontmatter)")
+    parser.add_argument("--event", dest="event", type=str, help="Ort/Event (falls nicht im Frontmatter)")
+    parser.add_argument("--date", dest="date", type=str, help="Datum (falls nicht im Frontmatter)")
+    parser.add_argument("--footer", dest="footer", type=str, help="Manueller Fußzeilentext")
+    parser.add_argument(
+        "--allow-no-footer",
+        dest="allow_no_footer",
+        action="store_true",
+        help="Erlaubt Folien ohne Fußzeile",
+    )
+    parser.add_argument(
+        "--strict-footer",
+        dest="strict_footer",
+        action="store_true",
+        help="Bricht mit Fehler ab, wenn Fußzeilen-Metadaten unvollständig sind",
+    )
+    parser.add_argument(
+        "--title-slide-number",
+        dest="title_slide_number",
+        action="store_true",
+        default=None,
+        help="Foliennummer auch auf der Titelfolie anzeigen",
+    )
+    parser.add_argument(
+        "--no-title-slide-number",
+        dest="title_slide_number",
+        action="store_false",
+        help="Keine Foliennummer auf der Titelfolie anzeigen (Standard)",
+    )
     args = parser.parse_args()
 
     md_text = args.infile.read_text(encoding="utf-8")
-    slides_data = parse_markdown(md_text)
+    meta, slides_data = parse_markdown(md_text)
+
+    # Determine whether title slide should display slide number
+    meta_title_num = parse_bool(
+        meta.get("title_slide_number")
+        or meta.get("first_slide_number")
+        or meta.get("number_title_slide")
+        or meta.get("slide_number_on_title"),
+        default=False,
+    )
+    show_title_num = args.title_slide_number if args.title_slide_number is not None else meta_title_num
+
+    # Validate footer metadata
+    footer_text, missing = validate_footer_metadata(
+        meta=meta,
+        cli_footer=args.footer,
+        cli_presenter=args.presenter,
+        cli_event=args.event,
+        cli_date=args.date,
+        allow_no_footer=args.allow_no_footer,
+    )
+
+    if missing and not args.allow_no_footer:
+        msg = (
+            f"Fußzeilen-Metadaten unvollständig ({', '.join(missing)}). "
+            "Bitte im Frontmatter der Markdown-Datei angeben (presenter, event, date) oder per CLI übergeben."
+        )
+        if args.strict_footer:
+            raise ValueError(msg)
+        else:
+            print(f"WARNUNG: {msg}", file=sys.stderr)
 
     # If no template specified, check default in templates/
     template_path = args.template
@@ -259,7 +566,13 @@ def main() -> int:
         if def_tpl.exists():
             template_path = def_tpl
 
-    prs = build_presentation(slides_data, template_path)
+    prs = build_presentation(
+        slides=slides_data,
+        template_path=template_path,
+        clear_template_slides=args.clear_template_slides,
+        footer_text=footer_text,
+        title_slide_number=show_title_num,
+    )
 
     # Atomic write
     args.outfile.parent.mkdir(parents=True, exist_ok=True)
@@ -289,6 +602,8 @@ def main() -> int:
         "in": str(args.infile).replace("\\", "/"),
         "out": str(args.outfile).replace("\\", "/"),
         "slides_count": len(slides_data),
+        "footer": footer_text,
+        "metadata": meta,
     }
     print(json.dumps(out_info, ensure_ascii=False, indent=2))
     return 0

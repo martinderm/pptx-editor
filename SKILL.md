@@ -30,7 +30,7 @@ Nutze diesen Skill für die wiederholbare und automatisierte Erstellung, Analyse
 5. **Markdown-Workflows:**
    - Aus strukturiertem Markdown direkt neue Folien generieren (mit Template-CI):
      ```bash
-     python scripts/markdown_to_pptx.py --in slides.md --out slides.pptx [--template template.pptx]
+     python scripts/markdown_to_pptx.py --in slides.md --out slides.pptx [--template template.pptx|template.potx] [--clear-template-slides]
      ```
    - Bestehende Präsentation in Markdown konvertieren:
      ```bash
@@ -62,9 +62,13 @@ Nutze diesen Skill für die wiederholbare und automatisierte Erstellung, Analyse
   ```bash
   python scripts/pptx_ops.py replace --in in.pptx --out out.pptx --find "Alt" --replace "Neu" [--slide 1] [--include-notes] [--json]
   ```
-- Detaillierte Folien- und Shape-Inspektion:
+- Detaillierte Folien- und Shape-Inspektion (unterstützt `.pptx` und `.potx`):
   ```bash
   python scripts/pptx_ops.py inspect --in presentation.pptx [--slide 1] [--json]
+  ```
+- PowerPoint-Vorlage (`.potx`) in bearbeitbare `.pptx` konvertieren:
+  ```bash
+  python scripts/pptx_ops.py convert-template --in template.potx --out template.pptx [--json]
   ```
 
 ### 2. LLM-Extraktion (`extract_pptx_for_llm.py`)
@@ -141,10 +145,35 @@ Nutze diesen Skill für die wiederholbare und automatisierte Erstellung, Analyse
 
 ## Markdown-Konventionen für Folien
 
-Folien können einfach in Markdown definiert werden:
+Folien werden als strukturiertes Markdown definiert. 
+
+### 1. Pflicht-Frontmatter für Metadaten & Fußzeile
+Jede Präsentationsdatei muss am Dateianfang ein YAML-Frontmatter mit Metadaten für die Fußzeile und Steuerungseinstellungen enthalten:
+
+```yaml
+---
+presenter: "Vorname Nachname"
+event: "Konferenz / Event / Anlass"
+date: "01.01.2026"
+title_slide_number: false   # Optional: true | false (steuert, ob die Titelfolie nummeriert wird; Standard: false)
+---
+```
+
+> [!IMPORTANT]
+> **Agenten-Regel — Fehlende Metadaten erfragen:**
+> Wenn in einer zu verarbeitenden Markdown-Präsentation kein Frontmatter mit `presenter`, `event` und `date` angegeben ist, **muss der KI-Agent den Nutzer vor der Generierung gezielt danach fragen**. Metadaten dürfen niemals eigenmächtig erfunden werden.
+
+### 2. Folienaufbau in Markdown
+Folien werden durch `---` getrennt:
 
 ```markdown
 ---
+presenter: "Vorname Nachname"
+event: "Konferenz / Event"
+date: "01.01.2026"
+title_slide_number: false
+---
+
 # Haupttitel der Präsentation
 ## Untertitel für den Vortrag
 
@@ -166,10 +195,52 @@ Folien können einfach in Markdown definiert werden:
 | Umsetzung | 2 Wochen | In Arbeit |
 ```
 
+### 3. Foliennummerierung & Fußzeilen-Verhalten
+- **Foliennummerierung:**
+  - Jede Inhaltsfolie erhält eine fortlaufende Foliennummer (2, 3...).
+  - **Steuerung der Titelfolie via Frontmatter:** Ob auf der ersten Folie (Titelfolie) eine Nummerierung erscheint, wird über `title_slide_number: true | false` im Markdown-Frontmatter bestimmt (Standard: `false`).
+  - **Layout-Integration:** Wenn die verwendete Vorlage (`.pptx` oder `.potx`) entsprechende Layout-Platzhalter (`PP_PLACEHOLDER.SLIDE_NUMBER`) definiert, werden diese automatisch geklont und befüllt. Dadurch werden Position, Schriftart, Farbe und Layout-Elemente der jeweiligen Vorlage exakt beibehalten. Fehlt der Platzhalter im Template, wird eine konsistente Nummerierung im unteren Folienbereich eingefügt.
+- **Fußzeile:**
+  - Die Fußzeile wird automatisch im Format `Vortragende/r | Ort/Event | Datum` aus den Frontmatter-Feldern erzeugt.
+  - Wenn die Vorlage einen Layout-Platzhalter (`PP_PLACEHOLDER.FOOTER`) besitzt, wird dieser geklont und befüllt (unter Beibehaltung von Typografie und Ausrichtung der Vorlage). Andernfalls wird ein sauberer Fallback generiert.
+
+---
+
+## Ordnerstruktur für Präsentationen (Multi-Version & Events)
+
+Präsentationen können für verschiedene Anlässe, Events oder Zielgruppen angepasst werden. Hierfür gilt folgende Standard-Ordnerstruktur (z. B. unter `memory/operations/marketing/presentations/<topic-slug>/`):
+
+```
+presentations/<topic-slug>/
+├── README.md                           # Übersicht zum Foliensatz, Anlässen & Zielgruppen
+├── master/                             # Kanonischer Master-Foliensatz
+│   ├── deck.md                         # Vollständiger Master-Inhalt
+│   ├── deck.pptx                       # Master PowerPoint
+│   └── deck.pdf                        # Master PDF
+└── events/                             # Event-, Datums- oder zielgruppenspezifische Versionen
+    ├── <YYYY-MM-DD>_<event-slug-1>/    # Konkrete Event-Instanz 1
+    │   ├── deck.md                     # Angepasstes Markdown (mit spezifischem Frontmatter)
+    │   ├── deck.pptx                   # Generierte Event-Präsentation
+    │   ├── deck.pdf                    # PDF für Vortrag / Handout
+    │   └── previews/                   # Rendered Folien-PNGs (Visuelle QA)
+    │       ├── slide-01.png
+    │       └── ...
+    └── <YYYY-MM-DD>_<event-slug-2>/    # Weitere Event-Instanz 2
+        ├── deck.md
+        ├── deck.pptx
+        ├── deck.pdf
+        └── previews/
+```
+
+**Vorteile:**
+1. **Klare Trennung:** Der Master bleibt die vollständige inhaltliche Basis; Events enthalten die jeweilige gekürzte/spezifisch gefilterte Instanz.
+2. **Eigenständigkeit:** Jedes Event-Verzeichnis ist in sich geschlossen mit eigenem Frontmatter, PPTX, PDF und Previews.
+3. **Reproduzierbarkeit:** Bei Nachfragen ist genau nachvollziehbar, welche Folien bei welchem Event gezeigt wurden.
+
 ---
 
 ## Practical Guidance & Best Practices
 
-- **Master-Layouts & CI:** Bei Erstellung immer die Vorlage (`--template templates/default-presentation.pptx`) nutzen, um CI-Vorgaben, Folienmaße (16:9) und Formatvorlagen beizubehalten.
+- **Master-Layouts & CI:** Bei Erstellung immer die Vorlage (`--template templates/default-presentation.pptx` oder `.potx`) nutzen, um CI-Vorgaben, Folienmaße (16:9) und Formatvorlagen beizubehalten.
 - **1-basierte Foliennummerierung:** Alle Parameter (`--slide`, `slide_number`, `row`, `col`) sind für intuitive menschliche und LLM-Interaktion 1-basiert.
 - **Multimodale Review:** Nach größeren Layout-Änderungen auf Windows-Hosts `export_pptx_to_images.ps1` ausführen und die Folien-PNGs zur visuellen Abnahme begutachten.

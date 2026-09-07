@@ -19,22 +19,37 @@ from pathlib import Path
 from typing import Any
 
 from pptx import Presentation
+from pptx.enum.shapes import PP_PLACEHOLDER
+
+try:
+    from pptx_ops import load_presentation
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from pptx_ops import load_presentation
 
 
 def existing_pptx(path_str: str) -> Path:
     p = Path(path_str)
     if not p.exists():
         raise argparse.ArgumentTypeError(f"Datei nicht gefunden: {path_str}")
-    if p.suffix.lower() != ".pptx":
-        raise argparse.ArgumentTypeError(f"Keine .pptx-Datei: {path_str}")
+    if p.suffix.lower() not in (".pptx", ".potx"):
+        raise argparse.ArgumentTypeError(f"Keine .pptx- oder .potx-Datei: {path_str}")
     return p
 
 
 def pptx_to_markdown(prs: Presentation) -> str:
     md_slides: list[str] = []
+    footer_text = ""
 
     for idx, slide in enumerate(prs.slides, start=1):
         lines: list[str] = []
+
+        # Check for footer metadata on first slide
+        if idx == 1:
+            for shape in slide.shapes:
+                if shape.is_placeholder and getattr(shape, "placeholder_format", None):
+                    if shape.placeholder_format.type == PP_PLACEHOLDER.FOOTER and shape.text.strip():
+                        footer_text = shape.text.strip()
 
         # 1. Slide Title
         title_text = ""
@@ -46,6 +61,15 @@ def pptx_to_markdown(prs: Presentation) -> str:
         for shape in slide.shapes:
             if shape == slide.shapes.title:
                 continue
+
+            # Skip footer, slide number and date placeholders from bullet extraction
+            if shape.is_placeholder and getattr(shape, "placeholder_format", None):
+                if shape.placeholder_format.type in (
+                    PP_PLACEHOLDER.FOOTER,
+                    PP_PLACEHOLDER.SLIDE_NUMBER,
+                    PP_PLACEHOLDER.DATE,
+                ):
+                    continue
 
             if shape.has_table:
                 tbl = shape.table
@@ -80,7 +104,15 @@ def pptx_to_markdown(prs: Presentation) -> str:
 
         md_slides.append("\n".join(lines).strip())
 
-    return "\n\n---\n\n".join(md_slides) + "\n"
+    body = "\n\n---\n\n".join(md_slides) + "\n"
+    if footer_text:
+        parts = [p.strip() for p in footer_text.split("|")]
+        if len(parts) == 3:
+            fm = f"---\npresenter: \"{parts[0]}\"\nevent: \"{parts[1]}\"\ndate: \"{parts[2]}\"\n---\n\n"
+        else:
+            fm = f"---\nfooter: \"{footer_text}\"\n---\n\n"
+        return fm + body
+    return body
 
 
 def main() -> int:
@@ -89,7 +121,7 @@ def main() -> int:
     parser.add_argument("--out", dest="outfile", type=Path, required=True, help="Ausgabe Markdown-Datei")
     args = parser.parse_args()
 
-    prs = Presentation(str(args.infile))
+    prs = load_presentation(args.infile)
     md_content = pptx_to_markdown(prs)
 
     # Atomic write

@@ -11,16 +11,54 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
 from pptx.util import Inches, Pt
+
+
+def is_potx(path_or_file: Path | str) -> bool:
+    return Path(path_or_file).suffix.lower() == ".potx"
+
+
+def potx_to_pptx_stream(potx_path: Path | str) -> io.BytesIO:
+    with open(potx_path, "rb") as f:
+        in_bytes = f.read()
+    in_zip = zipfile.ZipFile(io.BytesIO(in_bytes), "r")
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as out_zip:
+        for item in in_zip.infolist():
+            data = in_zip.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                data = data.replace(
+                    b"application/vnd.openxmlformats-officedocument.presentationml.template.main+xml",
+                    b"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+                )
+            out_zip.writestr(item, data)
+    out_buf.seek(0)
+    return out_buf
+
+
+def load_presentation(path_or_file: Path | str) -> Presentation:
+    p = Path(path_or_file)
+    if p.suffix.lower() == ".potx":
+        return Presentation(potx_to_pptx_stream(p))
+    return Presentation(str(p))
+
+
+def clear_slides(prs: Presentation) -> None:
+    while len(prs.slides) > 0:
+        rId = prs.slides._sldIdLst[0].rId
+        prs.part.drop_rel(rId)
+        del prs.slides._sldIdLst[0]
 
 
 def make_envelope(
@@ -43,9 +81,12 @@ def existing_pptx(path_str: str) -> Path:
     p = Path(path_str)
     if not p.exists():
         raise argparse.ArgumentTypeError(f"Datei nicht gefunden: {path_str}")
-    if p.suffix.lower() != ".pptx":
-        raise argparse.ArgumentTypeError(f"Keine .pptx-Datei: {path_str}")
+    if p.suffix.lower() not in (".pptx", ".potx"):
+        raise argparse.ArgumentTypeError(f"Keine .pptx- oder .potx-Datei: {path_str}")
     return p
+
+
+existing_pptx_or_potx = existing_pptx
 
 
 def get_shape_type_name(shape: Any) -> str:
@@ -76,7 +117,7 @@ def get_placeholder_type_name(shape: Any) -> str | None:
 
 
 def cmd_text(infile: Path, include_notes: bool = True, as_json: bool = False) -> None:
-    prs = Presentation(str(infile))
+    prs = load_presentation(infile)
     slides_data: list[dict[str, Any]] = []
     text_lines: list[str] = []
 
@@ -135,7 +176,7 @@ def cmd_text(infile: Path, include_notes: bool = True, as_json: bool = False) ->
 
 
 def cmd_stats(infile: Path, as_json: bool = False) -> None:
-    prs = Presentation(str(infile))
+    prs = load_presentation(infile)
     slide_count = len(prs.slides)
     total_words = 0
     shape_counts = {
@@ -221,7 +262,7 @@ def cmd_replace(
     if not find_str:
         raise ValueError("Parameter '--find' darf nicht leer sein.")
 
-    prs = Presentation(str(infile))
+    prs = load_presentation(infile)
     total_replaced = 0
     affected_slides: list[int] = []
 
@@ -323,7 +364,7 @@ def cmd_replace(
 
 
 def cmd_inspect(infile: Path, target_slide: int | None = None, as_json: bool = False) -> None:
-    prs = Presentation(str(infile))
+    prs = load_presentation(infile)
     width_in = prs.slide_width / 914400.0
     height_in = prs.slide_height / 914400.0
 
@@ -406,8 +447,45 @@ def cmd_inspect(infile: Path, target_slide: int | None = None, as_json: bool = F
                 print(f"    - ID {sh['shape_id']}: {sh['name']} ({sh['type']}{ph_str}){prev}")
 
 
+def cmd_convert_template(infile: Path, outfile: Path, as_json: bool = False) -> None:
+    prs = load_presentation(infile)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = tempfile.NamedTemporaryFile(
+        dir=str(outfile.parent),
+        prefix=f".tmp_{outfile.stem}_",
+        suffix=".pptx",
+        delete=False,
+    )
+    temp_path = Path(temp_file.name)
+    temp_file.close()
+    try:
+        prs.save(str(temp_path))
+        os.replace(str(temp_path), str(outfile))
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+    if as_json:
+        env = make_envelope(
+            action="convert-template",
+            success=True,
+            message=f"Converted {infile.name} to {outfile.name}",
+            data={
+                "in": str(infile).replace("\\", "/"),
+                "out": str(outfile).replace("\\", "/"),
+                "slide_count": len(prs.slides),
+                "layout_count": len(prs.slide_layouts),
+            },
+        )
+        print(json.dumps(env, ensure_ascii=False, indent=2))
+    else:
+        print(f"Erfolgreich konvertiert: {infile} -> {outfile} ({len(prs.slides)} Folien, {len(prs.slide_layouts)} Layouts)")
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="PowerPoint (.pptx) CLI Operations")
+    parser = argparse.ArgumentParser(description="PowerPoint (.pptx / .potx) CLI Operations")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # text
@@ -437,6 +515,12 @@ def parse_args() -> argparse.Namespace:
     p_inspect.add_argument("--slide", type=int, help="Optional auf bestimmte Folie (1-basiert) einschränken")
     p_inspect.add_argument("--json", action="store_true", help="Ausgabe als JSON Envelope")
 
+    # convert-template
+    p_conv = sub.add_parser("convert-template", help="PowerPoint-Vorlage (.potx) in bearbeitbare .pptx konvertieren")
+    p_conv.add_argument("--in", dest="infile", type=existing_pptx, required=True)
+    p_conv.add_argument("--out", dest="outfile", type=Path, required=True)
+    p_conv.add_argument("--json", action="store_true", help="Ausgabe als JSON Envelope")
+
     return parser.parse_args()
 
 
@@ -458,6 +542,8 @@ def main() -> int:
         )
     elif args.cmd == "inspect":
         cmd_inspect(args.infile, target_slide=args.slide, as_json=args.json)
+    elif args.cmd == "convert-template":
+        cmd_convert_template(args.infile, args.outfile, as_json=args.json)
     return 0
 
 

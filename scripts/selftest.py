@@ -222,10 +222,49 @@ def main() -> int:
         assert len(prs_regen.slides) == 3
 
         # 6. Verify default template integrity
-        print("[6/6] Verifying default template layout integrity...")
+        print("[6/7] Verifying default template layout integrity...")
         assert DEFAULT_TPL.exists()
         prs_tpl = Presentation(str(DEFAULT_TPL))
         assert len(prs_tpl.slide_layouts) >= 5
+
+        # 7. Test potx template support & convert-template
+        print("[7/7] Testing .potx template support and convert-template...")
+        import zipfile
+        fixture_potx = t / "fixture.potx"
+        with zipfile.ZipFile(fixture_pptx, "r") as z_in, zipfile.ZipFile(fixture_potx, "w") as z_out:
+            for item in z_in.infolist():
+                data = z_in.read(item.filename)
+                if item.filename == "[Content_Types].xml":
+                    data = data.replace(
+                        b"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+                        b"application/vnd.openxmlformats-officedocument.presentationml.template.main+xml",
+                    )
+                z_out.writestr(item, data)
+        assert fixture_potx.exists()
+
+        # Test inspecting .potx
+        p_inspect_potx = run_py([str(OPS), "inspect", "--in", str(fixture_potx), "--json"], t)
+        inspect_env = json.loads(p_inspect_potx.stdout)
+        assert inspect_env["success"] is True
+        assert inspect_env["data"]["total_slides"] == 3
+
+        # Test convert-template
+        converted_pptx = t / "converted_from_potx.pptx"
+        run_py([str(OPS), "convert-template", "--in", str(fixture_potx), "--out", str(converted_pptx), "--json"], t)
+        assert converted_pptx.exists()
+
+        # Test markdown_to_pptx using .potx template with slide clearing
+        potx_out_pptx = t / "built_with_potx.pptx"
+        run_py([
+            str(MD2PPTX),
+            "--in", str(exported_md),
+            "--out", str(potx_out_pptx),
+            "--template", str(fixture_potx),
+            "--clear-template-slides",
+        ], t)
+        assert potx_out_pptx.exists()
+        prs_potx_out = Presentation(str(potx_out_pptx))
+        assert len(prs_potx_out.slides) == 3
 
     print("=== All pptx-editor self-tests PASSED successfully! ===")
     return 0

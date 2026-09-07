@@ -23,6 +23,12 @@ from typing import Any
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
+try:
+    from pptx_ops import load_presentation
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from pptx_ops import load_presentation
+
 
 @dataclass
 class RAGBlock:
@@ -37,8 +43,8 @@ def existing_pptx(path_str: str) -> Path:
     p = Path(path_str)
     if not p.exists():
         raise argparse.ArgumentTypeError(f"Datei nicht gefunden: {path_str}")
-    if p.suffix.lower() != ".pptx":
-        raise argparse.ArgumentTypeError(f"Keine .pptx-Datei: {path_str}")
+    if p.suffix.lower() not in (".pptx", ".potx"):
+        raise argparse.ArgumentTypeError(f"Keine .pptx- oder .potx-Datei: {path_str}")
     return p
 
 
@@ -405,7 +411,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    prs = Presentation(str(args.infile))
+    prs = load_presentation(args.infile)
 
     v1 = extract_v1(args.infile, prs)
     write_json_atomic(args.outfile, v1)
