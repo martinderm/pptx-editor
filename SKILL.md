@@ -145,7 +145,7 @@ Nutze diesen Skill für die wiederholbare und automatisierte Erstellung, Analyse
 
 ## Markdown-Konventionen für Folien
 
-Folien werden als strukturiertes Markdown definiert. 
+Folien werden als strukturiertes Markdown definiert. Als schlüsselfertige Vorlage steht das generische Template [`templates/presentation-template.md`](templates/presentation-template.md) bereit, das alle unterstützten Features und das vollständige Frontmatter enthält.
 
 ### 1. Pflicht-Frontmatter für Metadaten & Fußzeile
 Jede Präsentationsdatei muss am Dateianfang ein YAML-Frontmatter mit Metadaten für die Fußzeile und Steuerungseinstellungen enthalten:
